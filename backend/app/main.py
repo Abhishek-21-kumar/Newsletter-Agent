@@ -1,7 +1,8 @@
 import os
 import uuid
+import time
 import asyncio
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 from pydantic import BaseModel
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -48,7 +49,6 @@ async def run_graph_background(thread_id: str, inputs: Optional[Dict[str, Any]] 
     """
     config = {"configurable": {"thread_id": thread_id}}
     try:
-        # Run/Resume execution
         print(f"[API Server] Background job running graph for thread: {thread_id}")
         await asyncio.to_thread(agent_graph.invoke, inputs, config)
         
@@ -67,7 +67,6 @@ async def run_graph_background(thread_id: str, inputs: Optional[Dict[str, Any]] 
         print(f"[API Server] Background job paused or ended for thread: {thread_id}")
     except Exception as e:
         print(f"[API Server] Error executing graph in background: {e}")
-        # Inject error log into thread state manually if possible
         try:
             state = agent_graph.get_state(config)
             current_logs = state.values.get("logs", []) if state and state.values else []
@@ -105,13 +104,24 @@ def start_agent(request: StartRequest, background_tasks: BackgroundTasks):
         "newsletter_intro": "",
         "newsletter_outro": "",
         "newsletter_html": "",
+        "newsletter_markdown": "",
         "critique": "",
         "revision_count": 0,
         "user_feedback": "",
         "approved": False,
         "status": "planning",
         "llm_provider": request.llm_provider,
-        "api_keys": api_keys
+        "api_keys": api_keys,
+        "start_time": time.time(),
+        "metrics": {
+            "duration_seconds": 0.0,
+            "articles_count": 0,
+            "scraped_count": 0,
+            "search_count": 0,
+            "char_count": 0,
+            "revision_count": 0
+        },
+        "tool_outputs": []
     }
     
     # Initialize the checkpoint in the checkpointer
@@ -131,13 +141,23 @@ def get_status(thread_id: str):
         raise HTTPException(status_code=404, detail="Thread state not found")
         
     values = state.values
-    # Determine if we are currently paused on the HITL interrupt
-    # In LangGraph, when execution pauses on a boundary, state.next lists the next node to run.
     is_paused = len(state.next) > 0 and state.next[0] == "hitl"
     
     status = values.get("status", "planning")
     if is_paused and values.get("mode") == "hitl" and not values.get("approved"):
         status = "waiting_for_feedback"
+        
+    # Calculate elapsed time dynamically if not completed
+    elapsed = 0.0
+    start_time = values.get("start_time")
+    if start_time:
+        if status in ["completed", "error"]:
+            elapsed = values.get("metrics", {}).get("duration_seconds", 0.0)
+        else:
+            elapsed = round(time.time() - start_time, 1)
+            
+    metrics = values.get("metrics", {}).copy()
+    metrics["duration_seconds"] = elapsed
         
     return {
         "thread_id": thread_id,
@@ -147,10 +167,13 @@ def get_status(thread_id: str):
         "logs": values.get("logs", []),
         "newsletter_subject": values.get("newsletter_subject"),
         "newsletter_html": values.get("newsletter_html"),
+        "newsletter_markdown": values.get("newsletter_markdown", ""),
         "revision_count": values.get("revision_count", 0),
         "approved": values.get("approved", False),
         "is_paused": is_paused,
         "llm_provider": values.get("llm_provider", "gemini"),
+        "metrics": metrics,
+        "tool_outputs": values.get("tool_outputs", []),
         "articles": [
             {
                 "title": art.get("title"),
@@ -171,23 +194,19 @@ def respond_agent(request: RespondRequest, background_tasks: BackgroundTasks):
     values = state.values
     
     if request.action == "approve":
-        # Update state: approved=True, set status to sending
         agent_graph.update_state(config, {
             "approved": True,
             "status": "sending"
         })
-        # Resume the graph
         background_tasks.add_task(run_graph_background, request.thread_id, None)
         return {"status": "sending"}
         
     elif request.action == "feedback":
-        # Update state: approved=False, set user feedback, route status to writing
         agent_graph.update_state(config, {
             "approved": False,
             "user_feedback": request.feedback,
             "status": "writing"
         })
-        # Resume the graph
         background_tasks.add_task(run_graph_background, request.thread_id, None)
         return {"status": "writing"}
         
@@ -196,10 +215,6 @@ def respond_agent(request: RespondRequest, background_tasks: BackgroundTasks):
 
 @app.get("/api/settings")
 def get_settings():
-    """
-    Returns whether the keys are configured in the backend environment.
-    (Boolean indicators to keep keys private)
-    """
     return {
         "gemini_configured": bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")),
         "openai_configured": bool(os.environ.get("OPENAI_API_KEY")),
@@ -208,13 +223,9 @@ def get_settings():
 
 @app.post("/api/settings")
 def save_settings(request: SettingsRequest):
-    """
-    Saves the provided API keys to the local .env file.
-    """
     env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
     
     try:
-        # Create empty .env if it doesn't exist
         if not os.path.exists(env_path):
             with open(env_path, "w") as f:
                 f.write("")

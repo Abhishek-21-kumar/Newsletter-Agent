@@ -1,5 +1,7 @@
 # Autonomous Newsletter Agent
 
+![Autonomous Newsletter Agent Demo Dashboard](assets/demo.webp)
+
 A stateful, multi-agent AI system designed to autonomously research, summarize, critique, and compose weekly HTML tech newsletters based on natural language goals, built using **LangGraph**, **FastAPI**, and a sleek **React (Vite)** dashboard styled with premium **Vanilla CSS**.
 
 ---
@@ -12,6 +14,31 @@ A stateful, multi-agent AI system designed to autonomously research, summarize, 
 - **Self-Reflection & Critique**: An internal editor agent evaluates drafts and auto-triggers corrections (up to 2 revisions) before human review.
 - **Human-in-the-Loop (HITL)**: Supports a toggle between fully autonomous operation and HITL mode, which pauses the workflow to allow human review, feedback loops, or direct approval.
 - **Premium UI**: Glassmorphic dark mode dashboard with real-time logs terminal, simulated stepper pipeline, and interactive side-by-side newsletter preview (live rendering iframe vs. HTML source code).
+
+---
+
+## Workflow Architecture
+
+The agent orchestrates the compilation of newsletters using a stateful LangGraph layout featuring automated critiques and human checkpoint interrupts:
+
+```mermaid
+graph TD
+    Start([User Goal Input]) --> Plan[1. Plan Node: Formulate Search Queries]
+    Plan --> Research[2. Research Node: Tavily / DDG Web Search & Scrape]
+    Research --> Summarize[3. Summarize Node: Contextual Summaries via LLM]
+    Summarize --> Write[4. Write Node: Draft subject/editorial, compiles HTML & MD]
+    Write --> Review[5. Review Node: LLM Self-Critique & Reflection]
+    
+    Review -->|Status = REVISE & count < 2| Write
+    Review -->|Status = PASS / max revisions| HITL{Human-in-the-Loop Toggle ON?}
+    
+    HITL -->|Yes| Pause[Pause Execution & Await User Decision]
+    Pause -->|Revisions Feedback| Write
+    Pause -->|Approve & Send| Send[6. Send Node: Archive HTML & MD Newsletters]
+    
+    HITL -->|No| Send
+    Send --> End([Newsletter Saved & Logs Completed])
+```
 
 ---
 
